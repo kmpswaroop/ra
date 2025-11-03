@@ -26,7 +26,7 @@ jobs:
         run: |
           mkdir -p scripts/repo-data-collector
           wget -O scripts/repo-data-collector/repo-data-collector \
-            "https://raw.githubusercontent.com/truxt-ai/doralake/new-git-zero-trust-plugin-generate-jenkins/scripts/repo-data-collector/bin/collector-linux-amd64"
+            "https://github.com/truxt-ai/doralake/raw/08ccb7a7d8ebb522f9dc3d7e05615958d2dce1c0/scripts/repo-data-collector/bin/collector-linux-amd64"
           chmod +x scripts/repo-data-collector/repo-data-collector
           ls -la scripts/repo-data-collector/repo-data-collector
 
