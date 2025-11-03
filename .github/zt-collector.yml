@@ -1,0 +1,138 @@
+name: GitHub Zero Trust Collector
+on:
+  workflow_dispatch:
+    inputs:
+      repo_path:
+        description: 'Git repository path or URL'
+        required: true
+        default: 'https://github.com/mozilla/addons-blog.git'
+  schedule:
+    - cron: '0 3 * * *'
+
+env:
+  DL_GCS_BUCKET: 'doralake-mozilla-data'
+  DL_GCS_PREFIX: 'addons-blog'
+  DL_GCP_PROJECT: 'mozilla-datalake-project'
+  DL_REPO_VAR_NAMES: 'MOZILLA_ADDONS_BLOG_REPO_URL'
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Repo Data Collector
+        run: |
+          mkdir -p scripts/repo-data-collector
+          wget -O scripts/repo-data-collector/repo-data-collector \
+            "https://raw.githubusercontent.com/truxt-ai/doralake/new-git-zero-trust-plugin-generate-jenkins/scripts/repo-data-collector/bin/collector-linux-amd64"
+          chmod +x scripts/repo-data-collector/repo-data-collector
+          ls -la scripts/repo-data-collector/repo-data-collector
+
+      - name: Prepare Credentials
+        run: |
+          # Prepare GitHub tokens
+          TOKEN_ENV_VARS=(
+            "GITHUB_TOKEN"
+            "MOZILLA_ADDONS_BLOG_GITHUB_TOKEN"
+          )
+          TOKENS=()
+          for token_var in "${TOKEN_ENV_VARS[@]}"; do
+            token_value="${!token_var:-}"
+            if [ -n "$token_value" ]; then
+              TOKENS+=("$token_value")
+            fi
+          done
+          
+          if [ ${#TOKENS[@]} -eq 0 ]; then
+            echo "At least one GitHub token is required" >&2
+            exit 1
+          fi
+          
+          printf '%s\n' "${TOKENS[@]}" > github-tokens.txt
+          echo "${TOKENS[0]}" > .github-token
+          printf '%s\n' "${TOKENS[@]}" | tr '\n' ',' > .github-token-list
+          
+          # Check repository environment variables
+          if [ -z "${DL_REPO_VAR_NAMES:-}" ]; then
+            echo "Configure at least one repository environment variable in DL_REPO_VAR_NAMES." >&2
+            exit 1
+          fi
+          
+          for repo_var in ${DL_REPO_VAR_NAMES}; do
+            repo_value="$(printenv "${repo_var}")"
+            if [ -z "$repo_value" ]; then
+              echo "Environment variable ${repo_var} must be set." >&2
+              exit 1
+            fi
+          done
+          
+          echo "REPO_ENV_VAR_LIST=${DL_REPO_VAR_NAMES}" >> $GITHUB_ENV
+
+      - name: Run Collector
+        run: |
+          cd scripts/repo-data-collector
+          
+          # Prepare command line arguments
+          CMD="./repo-data-collector"
+          CMD+=" -repo \"${{ github.event.inputs.repo_path || 'https://github.com/mozilla/addons-blog.git' }}\""
+          CMD+=" -output \"${{ github.event.inputs.output_dir || './output' }}\""
+          CMD+=" -shallow=${{ github.event.inputs.shallow || 'true' }}"
+          
+          # Add GitHub tokens
+          if [ -f "../github-tokens.txt" ]; then
+            TOKENS=$(cat ../github-tokens.txt | tr '\n' ',')
+            if [ -n "$TOKENS" ]; then
+              CMD+=" -github-token \"${TOKENS%,}\""
+            fi
+          fi
+          
+          # Add incremental options if enabled
+          if [ "${{ github.event.inputs.incremental }}" = "true" ]; then
+            CMD+=" -incremental=true"
+            CMD+=" -state-dir \"${{ github.event.inputs.state_dir || './.devlake-state' }}\""
+          fi
+          
+          # Add GCS options if upload is enabled
+          if [ "${{ github.event.inputs.upload_gcs }}" = "true" ]; then
+            CMD+=" -upload-gcs=true"
+            if [ -n "${{ github.event.inputs.gcs_project }}" ]; then
+              CMD+=" -gcs-project \"${{ github.event.inputs.gcs_project }}\""
+            fi
+            if [ -n "${{ github.event.inputs.gcs_bucket }}" ]; then
+              CMD+=" -gcs-bucket \"${{ github.event.inputs.gcs_bucket }}\""
+            fi
+            if [ -n "${{ github.event.inputs.gcs_folder }}" ]; then
+              CMD+=" -gcs-folder \"${{ github.event.inputs.gcs_folder }}\""
+            fi
+            CMD+=" -gcs-credentials \"../gcp-key.json\""
+          fi
+          
+          # Run the collector for each repository
+          for repo_var in ${DL_REPO_VAR_NAMES}; do
+            repo_url="$(printenv "${repo_var}")"
+            if [ -n "$repo_url" ]; then
+              REPO_CMD="$CMD -repo \"$repo_url\""
+              echo "Running collector for repository: $repo_url"
+              eval $REPO_CMD
+            fi
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MOZILLA_ADDONS_BLOG_GITHUB_TOKEN: ${{ secrets.MOZILLA_ADDONS_BLOG_GITHUB_TOKEN }}
+          MOZILLA_ADDONS_BLOG_REPO_URL: ${{ secrets.MOZILLA_ADDONS_BLOG_REPO_URL }}
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collector-output
+          path: |
+            **/*.csv
+            **/*.log
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        run: rm -f gcp-key.json github-tokens.txt .github-token .github-token-list
